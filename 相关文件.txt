@@ -1,0 +1,12 @@
+Anon key：
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRvZXNxd29leG11b3dqc3h2eHh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3Nzc5MTIsImV4cCI6MjA4ODM1MzkxMn0.W0lOjxGOqwtv43gjD96k1gL9r-gjAGkN2icKWFoNwhc
+
+API URL：
+https://toesqwoexmuowjsxvxxx.supabase.co
+
+启动代码：
+streamlit run app.py
+需要关闭vpn在终端命令行运行这段代码
+
+测试execl路径：
+C:\Users\81246\Desktop\iot-brain-monitor\test_data_random.xlsx
