@@ -9,4 +9,8 @@ streamlit run app.py
 需要关闭vpn在终端命令行运行这段代码
 
 测试execl路径：
-C:\Users\81246\Desktop\iot-brain-monitor\test_data_random.xlsx
+E:\WorkSpace\iot-brain-monitor\test_data_random.xlsx
+推送上线（终端内输入）：
+git add .
+git commit -m "xxx"
+git push
