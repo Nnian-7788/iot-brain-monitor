@@ -10,6 +10,7 @@ streamlit run app.py
 
 测试execl路径：
 E:\WorkSpace\iot-brain-monitor\test_data_random.xlsx
+
 推送上线（终端内输入）：
 git add .
 git commit -m "xxx"

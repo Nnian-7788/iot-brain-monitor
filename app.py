@@ -1,22 +1,18 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, date
-from supabase import create_client, Client
-import numpy as np
-from scipy.integrate import odeint
-import ssl
-import os
+from datetime import datetime
+import time
 import uuid
-import hashlib
 
-ssl._create_default_https_context = ssl._create_unverified_context
-os.environ['PYTHONHTTPSVERIFY'] = '0'
-
-SUPABASE_URL = "https://toesqwoexmuowjsxvxxx.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRvZXNxd29leG11b3dqc3h2eHh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3Nzc5MTIsImV4cCI6MjA4ODM1MzkxMn0.W0lOjxGOqwtv43gjD96k1gL9r-gjAGkN2icKWFoNwhc"
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+from config import (
+    supabase, init_database, get_all_patients, get_patient_by_id,
+    get_signals, get_uploaded_files, get_patient_stats,
+    detect_abnormal_signals, run_brain_model_cached
+)
+from utils import (
+    init_session_state, get_current_thresholds, force_refresh, get_patient_id_map
+)
 
 st.set_page_config(page_title="脑卒中预警物联网系统", layout="wide")
 st.title("🧠 实时生理信号监测 - 脑数字孪生物联网系统（多病人版）")
@@ -31,100 +27,43 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ==================== 数据库初始化 ====================
-def init_database():
-    try:
-        supabase.table("patients").select("*").limit(1).execute()
-    except:
-        try:
-            supabase.table("patients").insert({
-                "id": str(uuid.uuid4()),
-                "patient_name": "默认病人",
-                "patient_code": "DEFAULT001",
-                "age": 0,
-                "gender": "未知",
-                "created_at": datetime.now().isoformat()
-            }).execute()
-        except:
-            pass
-
 init_database()
+init_session_state()
 
-# ==================== 缓存函数（极速响应） ====================
-@st.cache_data(ttl=30, show_spinner=False)
-def get_all_patients():
-    try:
-        data = supabase.table("patients").select("*").order("created_at", desc=True).execute().data
-        return pd.DataFrame(data) if data else pd.DataFrame()
-    except:
-        return pd.DataFrame()
-
-@st.cache_data(ttl=30, show_spinner=False)
-def get_patient_by_id(patient_id):
-    try:
-        data = supabase.table("patients").select("*").eq("id", patient_id).execute().data
-        return data[0] if data else None
-    except:
-        return None
-
-@st.cache_data(ttl=20, show_spinner=False)
-def get_signals(patient_id=None, limit=100, order="desc"):
-    query = supabase.table("signal").select("*")
-    if patient_id:
-        query = query.eq("patient_id", patient_id)
-    if order == "desc":
-        query = query.order("id", desc=True)
-    data = query.limit(limit).execute().data
-    return pd.DataFrame(data) if data else pd.DataFrame()
-
-@st.cache_data(ttl=20, show_spinner=False)
-def get_uploaded_files(patient_id=None):
-    query = supabase.table("uploaded_files").select("*").order("upload_time", desc=True)
-    if patient_id:
-        query = query.eq("patient_id", patient_id)
-    data = query.execute().data
-    return pd.DataFrame(data) if data else pd.DataFrame()
-
-# 性能优化：批量数据处理
-@st.cache_data(ttl=10, show_spinner=False)
-def batch_process_data(df, operations):
-    """批量处理数据，减少多次重复计算"""
-    for op in operations:
-        if op['type'] == 'filter':
-            df = df[df[op['column']] == op['value']]
-        elif op['type'] == 'sort':
-            df = df.sort_values(op['column'], ascending=op['ascending'])
-    return df
-
-# ==================== 会话状态初始化 ====================
-if 'current_patient_id' not in st.session_state:
-    st.session_state.current_patient_id = None
-if 'current_patient_name' not in st.session_state:
-    st.session_state.current_patient_name = "全部病人"
-if 'view_mode' not in st.session_state:
-    st.session_state.view_mode = "all"
-
-# ==================== 侧边栏 - 病人管理 ====================
 st.sidebar.markdown("<h1>👤 病人管理</h1>", unsafe_allow_html=True)
 
 patients_df = get_all_patients()
+patient_options, patient_id_map = get_patient_id_map(patients_df)
 
 with st.sidebar.expander("➕ 新建病人", expanded=False):
     with st.form("new_patient_form"):
         new_name = st.text_input("病人姓名")
         new_code = st.text_input("病人编号", placeholder="例如: P001")
         new_age = st.number_input("年龄", min_value=0, max_value=150, value=50)
-        new_gender = st.selectbox("性别", ["男", "女", "其他"])
+        
+        gender_options = ["男", "女", "其他"] + st.session_state.custom_genders
+        new_gender = st.selectbox("性别", gender_options)
+        
+        if new_gender == "其他":
+            custom_gender = st.text_input("请输入自定义性别")
+        else:
+            custom_gender = new_gender
+        
         new_diagnosis = st.text_area("诊断信息", placeholder="可选")
         submit_patient = st.form_submit_button("创建病人")
         
         if submit_patient and new_name and new_code:
+            final_gender = custom_gender if new_gender == "其他" and custom_gender else new_gender
+            
+            if final_gender not in ["男", "女", "其他"] and final_gender not in st.session_state.custom_genders:
+                st.session_state.custom_genders.append(final_gender)
+            
             patient_data = {
                 "id": str(uuid.uuid4()),
                 "patient_name": new_name,
                 "patient_code": new_code,
                 "age": new_age,
-                "gender": new_gender,
+                "gender": final_gender,
                 "diagnosis": new_diagnosis,
                 "created_at": datetime.now().isoformat()
             }
@@ -132,30 +71,32 @@ with st.sidebar.expander("➕ 新建病人", expanded=False):
                 supabase.table("patients").insert(patient_data).execute()
                 st.success(f"✅ 病人 {new_name} 创建成功！")
                 st.cache_data.clear()
+                time.sleep(0.5)
                 st.rerun()
             except Exception as e:
                 st.error(f"创建失败: {e}")
 
-st.sidebar.markdown("---")
-
-patient_options = ["全部病人"]
-if not patients_df.empty:
-    for _, row in patients_df.iterrows():
-        display_name = f"{row['patient_name']} ({row['patient_code']})"
-        patient_options.append(f"{row['id']}|{display_name}")
-
-selected_option = st.sidebar.selectbox("选择病人", patient_options, index=0)
-
-if selected_option != "全部病人":
-    patient_id, patient_name = selected_option.split("|", 1)
-    st.session_state.current_patient_id = patient_id
-    st.session_state.current_patient_name = patient_name
-else:
-    st.session_state.current_patient_id = None
-    st.session_state.current_patient_name = "全部病人"
+with st.sidebar.expander("👥 选择病人", expanded=True):
+    selected_option = st.selectbox("", patient_options, index=0)
+    
+    if selected_option != "全部病人":
+        patient_id = patient_id_map[selected_option]
+        st.session_state.current_patient_id = patient_id
+        st.session_state.current_patient_name = selected_option
+    else:
+        st.session_state.current_patient_id = None
+        st.session_state.current_patient_name = "全部病人"
 
 current_patient_id = st.session_state.current_patient_id
 current_patient_name = st.session_state.current_patient_name
+
+if patients_df.empty:
+    st.session_state.custom_genders = []
+else:
+    all_genders = patients_df['gender'].unique().tolist()
+    valid_custom_genders = [g for g in st.session_state.custom_genders if g in all_genders]
+    if valid_custom_genders != st.session_state.custom_genders:
+        st.session_state.custom_genders = valid_custom_genders
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("<h1>📋 功能菜单</h1>", unsafe_allow_html=True)
@@ -167,19 +108,6 @@ for p in pages:
 
 page = st.session_state.get('current_page', "🏥 病人信息")
 
-# 阈值存储
-if 'patient_thresholds' not in st.session_state:
-    st.session_state.patient_thresholds = {}
-if 'default_thresholds' not in st.session_state:
-    st.session_state.default_thresholds = {"heart_rate_min": 60, "heart_rate_max": 100, "systolic_max": 140, "diastolic_max": 90, "spo2_min": 95}
-
-# 获取当前病人的阈值
-def get_current_thresholds():
-    if current_patient_id and current_patient_id in st.session_state.patient_thresholds:
-        return st.session_state.patient_thresholds[current_patient_id]
-    return st.session_state.default_thresholds
-
-# ==================== 页面1：病人信息管理 ====================
 if page == "🏥 病人信息":
     st.header("👥 病人信息管理")
     
@@ -192,7 +120,8 @@ if page == "🏥 病人信息":
         with col2:
             sort_by = st.selectbox("排序方式", ["创建时间", "姓名", "编号"])
         with col3:
-            filter_gender = st.selectbox("性别筛选", ["全部", "男", "女", "其他"])
+            gender_filter_options = ["全部", "男", "女", "其他"] + st.session_state.custom_genders
+            filter_gender = st.selectbox("性别筛选", gender_filter_options)
         
         filtered_df = patients_df.copy()
         if search_term:
@@ -220,13 +149,13 @@ if page == "🏥 病人信息":
                 with col_info2:
                     st.metric("性别", row.get('gender', '未知'))
                 with col_info3:
-                    signal_count = len(get_signals(row['id'], 10000))
-                    st.metric("数据记录", signal_count)
+                    stats = get_patient_stats(row['id'])
+                    st.metric("数据记录", stats["count"])
                 
                 st.write(f"**诊断信息**: {row.get('diagnosis', '无')}")
                 st.write(f"**创建时间**: {row.get('created_at', 'N/A')}")
                 
-                col_btn1, col_btn2 = st.columns(2)
+                col_btn1, col_btn2, col_btn3 = st.columns(3)
                 with col_btn1:
                     if st.button(f"查看数据", key=f"view_{row['id']}"):
                         st.session_state.current_patient_id = row['id']
@@ -234,6 +163,10 @@ if page == "🏥 病人信息":
                         st.session_state.current_page = "📊 仪表盘"
                         st.rerun()
                 with col_btn2:
+                    if st.button(f"编辑信息", key=f"edit_{row['id']}"):
+                        st.session_state.edit_patient_id = row['id']
+                        st.session_state.edit_patient_data = row.to_dict()
+                with col_btn3:
                     if st.button(f"删除病人", key=f"del_{row['id']}"):
                         try:
                             supabase.table("patients").delete().eq("id", row['id']).execute()
@@ -244,8 +177,63 @@ if page == "🏥 病人信息":
                             st.rerun()
                         except Exception as e:
                             st.error(f"删除失败: {e}")
+                
+                if 'edit_patient_id' in st.session_state and st.session_state.edit_patient_id == row['id']:
+                    with st.form(f"edit_patient_form_{row['id']}"):
+                        st.subheader("编辑病人信息")
+                        
+                        edit_name = st.text_input("病人姓名", value=row['patient_name'])
+                        edit_code = st.text_input("病人编号", value=row['patient_code'])
+                        edit_age = st.number_input("年龄", min_value=0, max_value=150, value=row.get('age', 50))
+                        
+                        edit_gender_options = ["男", "女", "其他"] + st.session_state.custom_genders
+                        edit_gender = st.selectbox("性别", edit_gender_options, index=edit_gender_options.index(row.get('gender', '未知')) if row.get('gender', '未知') in edit_gender_options else 0)
+                        
+                        if edit_gender == "其他":
+                            edit_custom_gender = st.text_input("请输入自定义性别", value=row.get('gender', ''))
+                        else:
+                            edit_custom_gender = edit_gender
+                        
+                        edit_diagnosis = st.text_area("诊断信息", value=row.get('diagnosis', ''))
+                        
+                        col_edit_btn1, col_edit_btn2 = st.columns(2)
+                        with col_edit_btn1:
+                            submit_edit = st.form_submit_button("保存修改")
+                        with col_edit_btn2:
+                            cancel_edit = st.form_submit_button("取消")
+                        
+                        if cancel_edit:
+                            del st.session_state.edit_patient_id
+                            del st.session_state.edit_patient_data
+                            st.rerun()
+                        
+                        if submit_edit:
+                            if not edit_name or not edit_code:
+                                st.error("病人姓名和编号不能为空")
+                            else:
+                                final_edit_gender = edit_custom_gender if edit_gender == "其他" and edit_custom_gender else edit_gender
+                                
+                                if final_edit_gender not in ["男", "女", "其他"] and final_edit_gender not in st.session_state.custom_genders:
+                                    st.session_state.custom_genders.append(final_edit_gender)
+                                
+                                update_data = {
+                                    "patient_name": edit_name,
+                                    "patient_code": edit_code,
+                                    "age": edit_age,
+                                    "gender": final_edit_gender,
+                                    "diagnosis": edit_diagnosis
+                                }
+                                
+                                try:
+                                    supabase.table("patients").update(update_data).eq("id", row['id']).execute()
+                                    st.success(f"✅ 病人信息更新成功！")
+                                    st.cache_data.clear()
+                                    del st.session_state.edit_patient_id
+                                    del st.session_state.edit_patient_data
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"更新失败: {e}")
 
-# ==================== 页面2：数据上传 ====================
 elif page == "📤 数据上传":
     st.header("📤 数据上传与文件管理")
     
@@ -261,18 +249,31 @@ elif page == "📤 数据上传":
             upload_patient_name = st.text_input("病人姓名", placeholder="输入病人姓名")
             upload_patient_code = st.text_input("病人编号", placeholder="例如: P001")
             upload_age = st.number_input("年龄", min_value=0, max_value=150, value=50)
-            upload_gender = st.selectbox("性别", ["男", "女", "其他"])
+            
+            upload_gender_options = ["男", "女", "其他"] + st.session_state.custom_genders
+            upload_gender = st.selectbox("性别", upload_gender_options)
+            
+            if upload_gender == "其他":
+                upload_custom_gender = st.text_input("请输入自定义性别")
+            else:
+                upload_custom_gender = upload_gender
+            
             upload_file = st.file_uploader("选择Excel/CSV文件", type=["xlsx", "csv"])
             submit_new = st.form_submit_button("上传并创建病人")
             
             if submit_new and upload_patient_name and upload_patient_code and upload_file:
+                final_upload_gender = upload_custom_gender if upload_gender == "其他" and upload_custom_gender else upload_gender
+                
+                if final_upload_gender not in ["男", "女", "其他"] and final_upload_gender not in st.session_state.custom_genders:
+                    st.session_state.custom_genders.append(final_upload_gender)
+                
                 patient_id = str(uuid.uuid4())
                 patient_data = {
                     "id": patient_id,
                     "patient_name": upload_patient_name,
                     "patient_code": upload_patient_code,
                     "age": upload_age,
-                    "gender": upload_gender,
+                    "gender": final_upload_gender,
                     "created_at": datetime.now().isoformat()
                 }
                 try:
@@ -284,13 +285,11 @@ elif page == "📤 数据上传":
         if patients_df.empty:
             st.warning("暂无现有病人，请先创建病人")
         else:
-            patient_options_upload = []
-            for _, row in patients_df.iterrows():
-                patient_options_upload.append(f"{row['id']}|{row['patient_name']} ({row['patient_code']})")
-            
+            patient_options_upload = patient_options[1:]
             selected_upload = st.selectbox("选择病人", patient_options_upload)
             if selected_upload:
-                upload_patient_id, upload_patient_name = selected_upload.split("|", 1)
+                upload_patient_id = patient_id_map[selected_upload]
+                upload_patient_name = selected_upload
                 upload_file = st.file_uploader("选择Excel/CSV文件", type=["xlsx", "csv"])
                 
                 if st.button("上传文件", type="primary") and upload_file:
@@ -300,7 +299,8 @@ elif page == "📤 数据上传":
 
     if upload_file and upload_patient_id:
         try:
-            df = pd.read_excel(upload_file) if upload_file.name.endswith(".xlsx") else pd.read_csv(upload_file)
+            with st.spinner("正在处理文件..."):
+                df = pd.read_excel(upload_file) if upload_file.name.endswith(".xlsx") else pd.read_csv(upload_file)
             
             st.write("📄 文件预览（前5行）：")
             st.dataframe(df.head(), use_container_width=True)
@@ -334,18 +334,25 @@ elif page == "📤 数据上传":
                 "file_size": upload_file.size
             }
             
-            try:
-                supabase.table("uploaded_files").insert(file_metadata).execute()
-            except:
-                pass
-            
-            timestamps = df["timestamp"].tolist()
-            try:
-                supabase.table("signal").delete().in_("timestamp", timestamps).eq("patient_id", upload_patient_id).execute()
-            except:
-                pass
-            
-            supabase.table("signal").insert(df.to_dict(orient="records")).execute()
+            with st.spinner("正在上传数据..."):
+                try:
+                    supabase.table("uploaded_files").insert(file_metadata).execute()
+                except:
+                    pass
+                
+                batch_size = 1000
+                timestamps = df["timestamp"].tolist()
+                for i in range(0, len(timestamps), batch_size):
+                    batch_timestamps = timestamps[i:i+batch_size]
+                    try:
+                        supabase.table("signal").delete().in_("timestamp", batch_timestamps).eq("patient_id", upload_patient_id).execute()
+                    except:
+                        pass
+                
+                records = df.to_dict(orient="records")
+                for i in range(0, len(records), batch_size):
+                    batch_records = records[i:i+batch_size]
+                    supabase.table("signal").insert(batch_records).execute()
             
             st.success(f"🎉 {len(df)} 条数据已存入 **{upload_patient_name}**")
             st.balloons()
@@ -387,7 +394,7 @@ elif page == "📤 数据上传":
         
         realtime_patient = st.selectbox("选择病人", patient_options[1:], key="realtime")
         if realtime_patient:
-            rt_patient_id, rt_patient_name = realtime_patient.split("|", 1)
+            rt_patient_id = patient_id_map[realtime_patient]
             
             if st.button("🚀 实时发送", type="primary"):
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -398,12 +405,12 @@ elif page == "📤 数据上传":
                     "diastolic_bp": dbp,
                     "spo2": spo2,
                     "patient_id": rt_patient_id,
-                    "patient_name": rt_patient_name
+                    "patient_name": realtime_patient
                 }]
                 try:
                     supabase.table("signal").delete().eq("timestamp", ts).eq("patient_id", rt_patient_id).execute()
                     supabase.table("signal").insert(new_data).execute()
-                    st.success(f"✅ 已实时存入 **{rt_patient_name}**")
+                    st.success(f"✅ 已实时存入 **{realtime_patient}**")
                 except Exception as e:
                     st.error(f"发送失败: {e}")
     
@@ -416,31 +423,8 @@ elif page == "📤 数据上传":
 # 接口地址: /api/sensor-data
 # 请求方法: POST
 # 请求格式: JSON
-#
-# 请求示例:
-{
-    "patient_id": "patient-123",
-    "data": {
-        "heart_rate": 85,
-        "systolic_bp": 125,
-        "diastolic_bp": 82,
-        "spo2": 98
-    },
-    "timestamp": "2024-01-01 12:00:00"
-}
-
-# 响应示例:
-{
-    "status": "success",
-    "message": "数据接收成功",
-    "data": {
-        "patient_id": "patient-123",
-        "record_count": 1
-    }
-}
-''')
+        ''')
         
-        st.markdown("### 传感器设备注册")
         device_name = st.text_input("设备名称")
         device_id = st.text_input("设备ID")
         device_type = st.selectbox("设备类型", ["心率传感器", "血压传感器", "血氧传感器", "多参数监护仪"])
@@ -462,13 +446,31 @@ elif page == "📤 数据上传":
                 except Exception as e:
                     st.error(f"清空失败: {e}")
 
-# ==================== 页面3：仪表盘 ====================
 elif page == "📊 仪表盘":
     st.header(f"📊 实时仪表盘 - {current_patient_name}")
     
+    col_refresh1, col_refresh2 = st.columns([3, 1])
+    with col_refresh1:
+        st.write(f"**数据更新状态**: 最后更新于 {st.session_state.last_refresh_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    with col_refresh2:
+        col_auto, col_manual = st.columns(2)
+        with col_auto:
+            st.session_state.auto_refresh = st.checkbox("自动刷新", value=st.session_state.auto_refresh)
+        with col_manual:
+            if st.button("手动刷新"):
+                force_refresh()
+                st.rerun()
+    
+    if st.session_state.auto_refresh:
+        time_since_refresh = (datetime.now() - st.session_state.last_refresh_time).total_seconds()
+        if time_since_refresh > 5:
+            force_refresh()
+            st.rerun()
+    
     if current_patient_id:
-        df = get_signals(current_patient_id, 1)
-        patient_info = get_patient_by_id(current_patient_id)
+        with st.spinner("加载数据中..."):
+            df = get_signals(current_patient_id, 1)
+            patient_info = get_patient_by_id(current_patient_id)
         
         if patient_info:
             col_info1, col_info2, col_info3, col_info4 = st.columns(4)
@@ -483,12 +485,13 @@ elif page == "📊 仪表盘":
         
         if not df.empty:
             latest = df.iloc[0]
+            current_thresholds = get_current_thresholds(current_patient_id)
             col1, col2, col3, col4 = st.columns(4)
             with col1: st.metric("❤️ 心率", f"{latest['heart_rate']:.1f} bpm")
             with col2: st.metric("🩸 血压", f"{latest['systolic_bp']:.0f}/{latest['diastolic_bp']:.0f} mmHg")
             with col3: st.metric("🫁 血氧", f"{latest['spo2']:.1f} %")
             with col4:
-                risk = "⚠️ 高风险" if latest["systolic_bp"] > thresholds["systolic_max"] else "✅ 正常"
+                risk = "⚠️ 高风险" if latest["systolic_bp"] > current_thresholds["systolic_max"] else "✅ 正常"
                 st.metric("卒中风险", risk)
             
             st.progress(int(min(max(latest['heart_rate'], 40), 120) / 120 * 100), "心率进度")
@@ -505,7 +508,8 @@ elif page == "📊 仪表盘":
             st.metric("📈 总记录数", len(all_df))
         with col_stat3:
             if not all_df.empty:
-                abnormal = len(all_df[(all_df["systolic_bp"] > 140) | (all_df["heart_rate"] > 100) | (all_df["spo2"] < 95)])
+                current_thresholds = get_current_thresholds(None)
+                abnormal = len(all_df[(all_df["systolic_bp"] > current_thresholds["systolic_max"]) | (all_df["heart_rate"] > current_thresholds["heart_rate_max"]) | (all_df["spo2"] < current_thresholds["spo2_min"])])
                 st.metric("🚨 异常记录", abnormal)
             else:
                 st.metric("🚨 异常记录", 0)
@@ -515,14 +519,24 @@ elif page == "📊 仪表盘":
         
         if not all_df.empty and not all_patients.empty:
             patient_stats = []
+            
+            grouped = all_df.groupby('patient_id')
+            patient_data = grouped.agg({
+                'heart_rate': 'mean',
+                'systolic_bp': 'mean',
+                'diastolic_bp': 'mean',
+                'spo2': 'mean',
+                'patient_id': 'count'
+            }).rename(columns={'patient_id': 'count'})
+            
             for _, p in all_patients.iterrows():
-                p_signals = all_df[all_df['patient_id'] == p['id']]
-                if not p_signals.empty:
+                if p['id'] in patient_data.index:
+                    stats = patient_data.loc[p['id']]
                     patient_stats.append({
                         'name': p['patient_name'],
                         'code': p['patient_code'],
-                        'count': len(p_signals),
-                        'avg_hr': p_signals['heart_rate'].mean()
+                        'count': int(stats['count']),
+                        'avg_hr': stats['heart_rate']
                     })
             
             stats_df = pd.DataFrame(patient_stats)
@@ -534,24 +548,54 @@ elif page == "📊 仪表盘":
                     hide_index=True
                 )
 
-# ==================== 页面4：可视化图表 ====================
 elif page == "📈 可视化图表":
     st.header(f"📈 历史趋势图表 - {current_patient_name}")
     
     col_filter1, col_filter2, col_filter3 = st.columns([1, 1, 1])
     
     if current_patient_id:
-        df = get_signals(current_patient_id, 500, "asc")
-        
         with col_filter1:
-            time_range = st.selectbox("时间范围", ["最近50条", "最近100条", "最近200条", "最近500条", "全部"])
+            time_range = st.selectbox("时间范围", ["近1小时", "近6小时", "近24小时", "近7天", "全部"])
         with col_filter2:
             chart_type = st.selectbox("图表类型", ["折线图", "散点图", "面积图"])
         with col_filter3:
             show_stats = st.checkbox("显示统计信息", value=True)
         
-        limit_map = {"最近50条": 50, "最近100条": 100, "最近200条": 200, "最近500条": 500, "全部": 5000}
-        df = get_signals(current_patient_id, limit_map[time_range], "asc")
+        now = datetime.now()
+        if time_range == "近1小时":
+            time_limit = now - pd.Timedelta(hours=1)
+            limit = 360
+        elif time_range == "近6小时":
+            time_limit = now - pd.Timedelta(hours=6)
+            limit = 2160
+        elif time_range == "近24小时":
+            time_limit = now - pd.Timedelta(hours=24)
+            limit = 8640
+        elif time_range == "近7天":
+            time_limit = now - pd.Timedelta(days=7)
+            limit = 60480
+        else:
+            time_limit = None
+            limit = 5000
+        
+        with st.spinner("加载数据中..."):
+            df = get_signals(current_patient_id, min(1000, limit), "asc")
+            
+            if time_limit and not df.empty:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                if df['timestamp'].dt.tz is not None:
+                    import pytz
+                    time_limit = time_limit.replace(tzinfo=pytz.UTC)
+                df = df[df['timestamp'] >= time_limit]
+            
+            if len(df) < 50 and limit > 1000:
+                df = get_signals(current_patient_id, limit, "asc")
+                if time_limit and not df.empty:
+                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                    if df['timestamp'].dt.tz is not None:
+                        import pytz
+                        time_limit = time_limit.replace(tzinfo=pytz.UTC)
+                    df = df[df['timestamp'] >= time_limit]
         
         if not df.empty:
             if show_stats:
@@ -561,22 +605,44 @@ elif page == "📈 可视化图表":
                 with col_s3: st.metric("舒张压均值", f"{df['diastolic_bp'].mean():.1f}")
                 with col_s4: st.metric("血氧均值", f"{df['spo2'].mean():.1f}")
             
-            metric_options = ["心率", "收缩压", "舒张压", "血氧"]
-            selected_metrics = st.multiselect("选择显示指标", metric_options, default=["心率", "收缩压", "舒张压", "血氧"])
+            st.subheader("心率监测")
+            hr_fig = go.Figure()
+            hr_fig.add_trace(go.Scatter(
+                x=df['timestamp'], y=df['heart_rate'], name='心率',
+                mode='lines+markers', line=dict(color='red', width=2), marker=dict(size=3),
+                hovertemplate='时间: %{x}<br>心率: %{y:.1f} bpm<extra></extra>'
+            ))
+            hr_fig.update_layout(title='心率趋势', xaxis_title='时间', yaxis_title='心率 (bpm)',
+                                hovermode='x unified', template='plotly_white', margin=dict(l=20, r=20, t=40, b=20))
+            st.plotly_chart(hr_fig, use_container_width=True)
             
-            y_columns = []
-            if "心率" in selected_metrics: y_columns.append("heart_rate")
-            if "收缩压" in selected_metrics: y_columns.append("systolic_bp")
-            if "舒张压" in selected_metrics: y_columns.append("diastolic_bp")
-            if "血氧" in selected_metrics: y_columns.append("spo2")
+            st.subheader("血压监测")
+            bp_fig = go.Figure()
+            bp_fig.add_trace(go.Scatter(
+                x=df['timestamp'], y=df['systolic_bp'], name='收缩压',
+                mode='lines+markers', line=dict(color='blue', width=2), marker=dict(size=3),
+                hovertemplate='时间: %{x}<br>收缩压: %{y:.1f} mmHg<extra></extra>'
+            ))
+            bp_fig.add_trace(go.Scatter(
+                x=df['timestamp'], y=df['diastolic_bp'], name='舒张压',
+                mode='lines+markers', line=dict(color='green', width=2), marker=dict(size=3),
+                hovertemplate='时间: %{x}<br>舒张压: %{y:.1f} mmHg<extra></extra>'
+            ))
+            bp_fig.update_layout(title='血压趋势', xaxis_title='时间', yaxis_title='血压 (mmHg)',
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                                hovermode='x unified', template='plotly_white', margin=dict(l=20, r=20, t=40, b=20))
+            st.plotly_chart(bp_fig, use_container_width=True)
             
-            if y_columns:
-                if chart_type == "折线图":
-                    st.plotly_chart(px.line(df, x="timestamp", y=y_columns, title="生理指标趋势", markers=True).update_layout(xaxis_title="时间", yaxis_title="值"), use_container_width=True)
-                elif chart_type == "散点图":
-                    st.plotly_chart(px.scatter(df, x="timestamp", y=y_columns, title="生理指标散点图").update_layout(xaxis_title="时间", yaxis_title="值"), use_container_width=True)
-                else:
-                    st.plotly_chart(px.area(df, x="timestamp", y=y_columns, title="生理指标面积图").update_layout(xaxis_title="时间", yaxis_title="值"), use_container_width=True)
+            st.subheader("血氧监测")
+            spo2_fig = go.Figure()
+            spo2_fig.add_trace(go.Scatter(
+                x=df['timestamp'], y=df['spo2'], name='血氧',
+                mode='lines+markers', line=dict(color='purple', width=2), marker=dict(size=3),
+                hovertemplate='时间: %{x}<br>血氧: %{y:.1f} %<extra></extra>'
+            ))
+            spo2_fig.update_layout(title='血氧趋势', xaxis_title='时间', yaxis_title='血氧 (%)',
+                                  hovermode='x unified', template='plotly_white', margin=dict(l=20, r=20, t=40, b=20))
+            st.plotly_chart(spo2_fig, use_container_width=True)
             
             with st.expander("📊 详细数据表格"):
                 st.dataframe(df, use_container_width=True)
@@ -584,29 +650,7 @@ elif page == "📈 可视化图表":
             st.info("该病人暂无数据")
     else:
         st.info("请先在侧边栏选择具体病人")
-        
-        patients_df = get_all_patients()
-        if not patients_df.empty:
-            st.subheader("或选择病人进行对比分析")
-            compare_patients = st.multiselect("选择对比病人", 
-                [f"{p['id']}|{p['patient_name']} ({p['patient_code']})" for _, p in patients_df.iterrows()],
-                default=[])
-            
-            if compare_patients and len(compare_patients) > 0:
-                all_data = []
-                for p in compare_patients:
-                    pid, pname = p.split("|", 1)
-                    df_p = get_signals(pid, 100, "asc")
-                    if not df_p.empty:
-                        df_p['patient_name'] = pname
-                        all_data.append(df_p)
-                
-                if all_data:
-                    compare_df = pd.concat(all_data, ignore_index=True)
-                    st.plotly_chart(px.line(compare_df, x="timestamp", y="heart_rate", color="patient_name", title="多病人心率对比").update_layout(xaxis_title="时间", yaxis_title="心率 (bpm)"), use_container_width=True)
-                    st.plotly_chart(px.line(compare_df, x="timestamp", y="systolic_bp", color="patient_name", title="多病人血压对比").update_layout(xaxis_title="时间", yaxis_title="收缩压 (mmHg)"), use_container_width=True)
 
-# ==================== 页面5：异常报警 ====================
 elif page == "🚨 异常报警":
     st.header(f"🚨 信号异常报警 - {current_patient_name}")
     
@@ -615,8 +659,8 @@ elif page == "🚨 异常报警":
             df = get_signals(current_patient_id, 100)
         
         if not df.empty:
-            # 使用当前病人的阈值
-            current_thresholds = get_current_thresholds()
+            current_thresholds = get_current_thresholds(current_patient_id)
+            df_display, abnormal_count = detect_abnormal_signals(df, current_thresholds)
             
             def highlight_abnormal(val, col_name):
                 if col_name == "heart_rate" and (val < current_thresholds["heart_rate_min"] or val > current_thresholds["heart_rate_max"]):
@@ -627,32 +671,10 @@ elif page == "🚨 异常报警":
                     return "color: white; background-color: #ff4d4d; font-weight: bold"
                 return ""
             
-            # 批量处理异常检测
-            df_display = df.copy()
-            df_display["异常类型"] = ""
-            
-            # 向量式操作，提高性能
-            hr_abnormal = (df["heart_rate"] < current_thresholds["heart_rate_min"]) | (df["heart_rate"] > current_thresholds["heart_rate_max"])
-            bp_abnormal = (df["systolic_bp"] > current_thresholds["systolic_max"]) | (df["diastolic_bp"] > current_thresholds["diastolic_max"])
-            spo2_abnormal = df["spo2"] < current_thresholds["spo2_min"]
-            
-            for idx, row in df.iterrows():
-                abnormal_list = []
-                if hr_abnormal[idx]:
-                    abnormal_list.append(f"心率({row['heart_rate']:.1f})")
-                if bp_abnormal[idx]:
-                    abnormal_list.append(f"血压({row['systolic_bp']:.0f}/{row['diastolic_bp']:.0f})")
-                if spo2_abnormal[idx]:
-                    abnormal_list.append(f"血氧({row['spo2']:.1f})")
-                if abnormal_list:
-                    df_display.loc[idx, "异常类型"] = "、".join(abnormal_list)
-            
             styled_df = df_display.style.apply(lambda x: [highlight_abnormal(v, col) for col, v in x.items()], axis=1)
             
-            abnormal_count = len(df_display[df_display["异常类型"] != ""])
             if abnormal_count > 0:
                 st.error(f"🚨 发现 {abnormal_count} 条异常记录！")
-                # 分页显示，提高UI响应速度
                 page_size = 20
                 total_pages = (len(df_display) + page_size - 1) // page_size
                 page = st.number_input("页码", min_value=1, max_value=total_pages, value=1)
@@ -660,16 +682,17 @@ elif page == "🚨 异常报警":
                 end_idx = start_idx + page_size
                 st.dataframe(styled_df.iloc[start_idx:end_idx], use_container_width=True, hide_index=True)
                 
+                hr_abnormal = (df["heart_rate"] < current_thresholds["heart_rate_min"]) | (df["heart_rate"] > current_thresholds["heart_rate_max"])
+                bp_abnormal = (df["systolic_bp"] > current_thresholds["systolic_max"]) | (df["diastolic_bp"] > current_thresholds["diastolic_max"])
+                spo2_abnormal = df["spo2"] < current_thresholds["spo2_min"]
+                
                 col_ab1, col_ab2 = st.columns(2)
                 with col_ab1:
-                    abnormal_hr = hr_abnormal.sum()
-                    st.metric("心率异常", abnormal_hr)
+                    st.metric("心率异常", hr_abnormal.sum())
                 with col_ab2:
-                    abnormal_bp = bp_abnormal.sum()
-                    st.metric("血压异常", abnormal_bp)
+                    st.metric("血压异常", bp_abnormal.sum())
                 
-                abnormal_spo2 = spo2_abnormal.sum()
-                st.metric("血氧异常", abnormal_spo2)
+                st.metric("血氧异常", spo2_abnormal.sum())
             else:
                 st.success("✅ 所有信号正常")
         else:
@@ -678,8 +701,7 @@ elif page == "🚨 异常报警":
         with st.spinner("分析系统数据中..."):
             all_df = get_signals(None, 500)
         if not all_df.empty:
-            # 使用默认阈值
-            current_thresholds = get_current_thresholds()
+            current_thresholds = get_current_thresholds(None)
             abnormal_df = all_df[
                 (all_df["systolic_bp"] > current_thresholds["systolic_max"]) | 
                 (all_df["heart_rate"] > current_thresholds["heart_rate_max"]) | 
@@ -688,7 +710,6 @@ elif page == "🚨 异常报警":
             st.error(f"🚨 系统中共有 {len(abnormal_df)} 条异常记录")
             
             if not abnormal_df.empty:
-                # 分页显示
                 page_size = 20
                 total_pages = (len(abnormal_df) + page_size - 1) // page_size
                 page = st.number_input("页码", min_value=1, max_value=total_pages, value=1)
@@ -698,7 +719,6 @@ elif page == "🚨 异常报警":
         else:
             st.info("暂无数据")
 
-# ==================== 页面6：脑数字孪生模型 ====================
 elif page == "🧬 脑数字孪生模型":
     st.header(f"🧬 大脑数字孪生体模型 - {current_patient_name}")
     
@@ -708,13 +728,7 @@ elif page == "🧬 脑数字孪生模型":
         if not df.empty and st.button("🚀 运行内置简易模型"):
             with st.spinner("高性能数值计算中..."):
                 latest = df.iloc[0]
-                
-                def cerebral_model(y, t, bp):
-                    return [-0.5*y[0] + 0.3*(bp-100) + np.random.normal(0, 0.5)]
-                
-                t = np.linspace(0, 60, 600)
-                sol = odeint(cerebral_model, [10], t, args=(latest["systolic_bp"],))
-                risk = min(max(15 + (latest["systolic_bp"]-120)*0.8 + (100-latest["spo2"])*0.5, 5), 95)
+                t, sol, risk = run_brain_model_cached(latest["systolic_bp"], latest["spo2"])
                 
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=t, y=sol[:, 0], mode='lines', name='颅内压', line=dict(color='blue', width=2)))
@@ -753,17 +767,12 @@ elif page == "🧬 脑数字孪生模型":
     else:
         st.info("请先在侧边栏选择具体病人")
 
-# ==================== 页面6：阈值设置 ====================
 elif page == "⚙️ 阈值设置":
     st.header("⚙️ 阈值设置")
     
-    threshold_type = st.radio(
-        "阈值类型",
-        ["全局默认阈值", "病人专属阈值"],
-        horizontal=True
-    )
+    threshold_type = st.radio("阈值类型", ["全局默认阈值", "病人专属阈值"], horizontal=True)
     
-    current_thresholds = get_current_thresholds()
+    current_thresholds = get_current_thresholds(current_patient_id)
     
     if threshold_type == "病人专属阈值":
         if current_patient_id:
@@ -795,8 +804,6 @@ elif page == "⚙️ 阈值设置":
                 st.session_state.patient_thresholds[current_patient_id] = new_thresholds
                 st.success(f"✅ 已保存 **{current_patient_name}** 的专属阈值")
             else:
-                # 保存为默认阈值
-                # 直接修改模块级变量
                 st.session_state.default_thresholds = new_thresholds
                 st.success("✅ 已保存全局默认阈值")
     
@@ -807,114 +814,5 @@ elif page == "⚙️ 阈值设置":
         st.info(f"当前使用 **{current_patient_name}** 的专属阈值")
     else:
         st.info("当前使用全局默认阈值")
-
-# ==================== 页面7：脑数字孪生模型 ====================
-elif page == "🧬 脑数字孪生模型":
-    st.header(f"🧬 大脑数字孪生体模型 - {current_patient_name}")
-    
-    if current_patient_id:
-        df = get_signals(current_patient_id, 1)
-        
-        if not df.empty and st.button("🚀 运行内置简易模型"):
-            with st.spinner("高性能数值计算中..."):
-                latest = df.iloc[0]
-                
-                def cerebral_model(y, t, bp):
-                    return [-0.5*y[0] + 0.3*(bp-100) + np.random.normal(0, 0.5)]
-                
-                t = np.linspace(0, 60, 600)
-                sol = odeint(cerebral_model, [10], t, args=(latest["systolic_bp"],))
-                risk = min(max(15 + (latest["systolic_bp"]-120)*0.8 + (100-latest["spo2"])*0.5, 5), 95)
-                
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=t, y=sol[:, 0], mode='lines', name='颅内压', line=dict(color='blue', width=2)))
-                fig.update_layout(title="大脑颅内压动态演化曲线", xaxis_title="时间 (s)", yaxis_title="颅内压 (mmHg)")
-                st.plotly_chart(fig, use_container_width=True)
-                
-                col_r1, col_r2, col_r3 = st.columns(3)
-                with col_r1:
-                    st.metric("当前收缩压", f"{latest['systolic_bp']:.0f} mmHg")
-                with col_r2:
-                    st.metric("当前血氧", f"{latest['spo2']:.1f} %")
-                with col_r3:
-                    st.metric("卒中风险概率", f"{risk:.1f}%", delta_color="inverse" if risk > 50 else "normal")
-                
-                if risk > 70:
-                    st.error("⚠️ 高风险警告！建议立即采取干预措施！")
-                elif risk > 40:
-                    st.warning("⚠️ 中等风险，请密切关注患者状态")
-                else:
-                    st.success("✅ 风险较低，继续保持监测")
-        
-        with st.expander("🔌 高级模型接入接口", expanded=False):
-            model_file = st.file_uploader("上传脑数字孪生模型代码 (.py)", type=["py"])
-            
-            if model_file:
-                st.subheader("模型参数配置")
-                model_params = {}
-                
-                # 通用模型参数
-                model_params['time_steps'] = st.number_input("时间步数", min_value=100, max_value=1000, value=600)
-                model_params['noise_level'] = st.slider("噪声水平", min_value=0.0, max_value=1.0, value=0.5)
-                model_params['threshold'] = st.number_input("风险阈值", min_value=0, max_value=100, value=70)
-                
-                if st.button("加载并运行外部模型"):
-                    try:
-                        code = model_file.read().decode("utf-8")
-                        local_vars = {'params': model_params}
-                        exec(code, globals(), local_vars)
-                        if "run_brain_model" in local_vars:
-                            latest = df.iloc[0] if not df.empty else None
-                            fig, risk = local_vars["run_brain_model"](latest, model_params)
-                            st.plotly_chart(fig, use_container_width=True)
-                            st.success(f"**外部模型运行成功！卒中风险：{risk:.1f}%**")
-                    except Exception as e:
-                        st.error(f"加载失败：{e}")
-            
-            st.markdown("### 模型接入规范")
-            st.code('''
-# 脑数字孪生模型接入规范
-
-# 模型文件必须包含以下函数：
-def run_brain_model(patient_data, params=None):
-    """
-    运行脑数字孪生模型
-    
-    参数:
-        patient_data: 病人数据字典或None
-        params: 模型参数字典
-    
-    返回:
-        fig: Plotly图表对象
-        risk: 风险值 (0-100)
-    """
-    # 模型实现...
-    return fig, risk
-''')
-        
-        with st.expander("🧠 模型库", expanded=False):
-            st.subheader("预定义模型库")
-            model_choice = st.selectbox("选择预定义模型", ["简易颅内压模型", "复杂神经网络模型", "混合物理模型"])
-            
-            if st.button("运行预定义模型"):
-                with st.spinner("模型运行中..."):
-                    if model_choice == "简易颅内压模型":
-                        # 内置简易模型
-                        if not df.empty:
-                            latest = df.iloc[0]
-                            def cerebral_model(y, t, bp):
-                                return [-0.5*y[0] + 0.3*(bp-100) + np.random.normal(0, 0.5)]
-                            t = np.linspace(0, 60, 600)
-                            sol = odeint(cerebral_model, [10], t, args=(latest["systolic_bp"],))
-                            risk = min(max(15 + (latest["systolic_bp"]-120)*0.8 + (100-latest["spo2"])*0.5, 5), 95)
-                            fig = go.Figure()
-                            fig.add_trace(go.Scatter(x=t, y=sol[:, 0], mode='lines', name='颅内压', line=dict(color='blue', width=2)))
-                            fig.update_layout(title="大脑颅内压动态演化曲线", xaxis_title="时间 (s)", yaxis_title="颅内压 (mmHg)")
-                            st.plotly_chart(fig, use_container_width=True)
-                            st.success(f"**模型运行成功！卒中风险：{risk:.1f}%**")
-                    else:
-                        st.info(f"{model_choice} 正在开发中...")
-    else:
-        st.info("请先在侧边栏选择具体病人")
 
 st.caption(f"当前查看：**{current_patient_name}** | 数据分类存储 | 文件归属管理")
