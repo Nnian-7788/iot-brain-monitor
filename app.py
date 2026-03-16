@@ -15,8 +15,8 @@ from utils import (
 )
 
 st.set_page_config(page_title="脑卒中预警物联网系统", layout="wide")
-st.title("🧠 实时生理信号监测 - 脑数字孪生物联网系统（多病人版）")
-st.markdown("**增强版**：病人管理 + 文件归属标识 + 智能数据分类存储")
+st.title("🧠 生理信号监测 - 数字孪生物联网系统")
+st.markdown("**Enhanced Version**：Designed by Nnian,2026")
 
 st.markdown("""
 <style>
