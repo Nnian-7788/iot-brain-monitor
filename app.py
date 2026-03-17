@@ -877,4 +877,4 @@ elif page == "⚙️ 阈值设置":
     else:
         st.info("当前使用全局默认阈值")
 
-st.caption(f"当前查看：**{current_patient_name}** | 数据分类存储 | 文件归属管理")
+st.caption(f"Version:1.2.0 Designed by Nnian,2026.3.17")
