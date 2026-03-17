@@ -14,7 +14,7 @@ from utils import (
     init_session_state, get_current_thresholds, force_refresh, get_patient_id_map
 )
 
-st.set_page_config(page_title="脑卒中物联网系统", layout="wide")
+st.set_page_config(page_title="嘻嘻", layout="wide")
 st.title("🧠 生理信号 - DT物联网系统")
 st.markdown("**Enhanced Version**：Designed by Nnian,2026")
 
