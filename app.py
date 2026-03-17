@@ -14,8 +14,8 @@ from utils import (
     init_session_state, get_current_thresholds, force_refresh, get_patient_id_map
 )
 
-st.set_page_config(page_title="脑卒中预警物联网系统", layout="wide")
-st.title("🧠 生理信号监测 - 数字孪生物联网系统")
+st.set_page_config(page_title="脑卒中物联网系统", layout="wide")
+st.title("🧠 生理信号 - DT物联网系统")
 st.markdown("**Enhanced Version**：Designed by Nnian,2026")
 
 st.markdown("""
@@ -41,11 +41,12 @@ with st.sidebar.expander("➕ 新建病人", expanded=False):
         new_code = st.text_input("病人编号", placeholder="例如: P001")
         new_age = st.number_input("年龄", min_value=0, max_value=150, value=50)
         
-        gender_options = ["男", "女", "其他"] + st.session_state.custom_genders
+        gender_options = ["男", "女", "其他"]
         new_gender = st.selectbox("性别", gender_options)
         
+        custom_gender = None
         if new_gender == "其他":
-            custom_gender = st.text_input("请输入自定义性别")
+            custom_gender = st.text_input("自定义性别", placeholder="请输入1-20个字符", max_chars=20)
         else:
             custom_gender = new_gender
         
@@ -53,28 +54,46 @@ with st.sidebar.expander("➕ 新建病人", expanded=False):
         submit_patient = st.form_submit_button("创建病人")
         
         if submit_patient and new_name and new_code:
-            final_gender = custom_gender if new_gender == "其他" and custom_gender else new_gender
+            final_gender = None
             
-            if final_gender not in ["男", "女", "其他"] and final_gender not in st.session_state.custom_genders:
-                st.session_state.custom_genders.append(final_gender)
+            if new_gender == "其他":
+                if not custom_gender:
+                    st.error("选择'其他'时请输入自定义性别")
+                elif len(custom_gender.strip()) < 1:
+                    st.error("自定义性别不能为空")
+                else:
+                    # 验证是否包含HTML标签或脚本内容
+                    import re
+                    html_pattern = re.compile(r'<[^>]+>')
+                    script_pattern = re.compile(r'<script[^>]*>.*?</script>', re.DOTALL)
+                    
+                    if html_pattern.search(custom_gender) or script_pattern.search(custom_gender):
+                        st.error("自定义性别不允许包含HTML标签或脚本内容")
+                    else:
+                        final_gender = custom_gender
+                        if final_gender not in st.session_state.custom_genders:
+                            st.session_state.custom_genders.append(final_gender)
+            else:
+                final_gender = new_gender
             
-            patient_data = {
-                "id": str(uuid.uuid4()),
-                "patient_name": new_name,
-                "patient_code": new_code,
-                "age": new_age,
-                "gender": final_gender,
-                "diagnosis": new_diagnosis,
-                "created_at": datetime.now().isoformat()
-            }
-            try:
-                supabase.table("patients").insert(patient_data).execute()
-                st.success(f"✅ 病人 {new_name} 创建成功！")
-                st.cache_data.clear()
-                time.sleep(0.5)
-                st.rerun()
-            except Exception as e:
-                st.error(f"创建失败: {e}")
+            if final_gender:
+                patient_data = {
+                    "id": str(uuid.uuid4()),
+                    "patient_name": new_name,
+                    "patient_code": new_code,
+                    "age": new_age,
+                    "gender": final_gender,
+                    "diagnosis": new_diagnosis,
+                    "created_at": datetime.now().isoformat()
+                }
+                try:
+                    supabase.table("patients").insert(patient_data).execute()
+                    st.success(f"✅ 病人 {new_name} 创建成功！")
+                    st.cache_data.clear()
+                    time.sleep(0.5)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"创建失败: {e}")
 
 with st.sidebar.expander("👥 选择病人", expanded=True):
     selected_option = st.selectbox("", patient_options, index=0)
@@ -186,13 +205,19 @@ if page == "🏥 病人信息":
                         edit_code = st.text_input("病人编号", value=row['patient_code'])
                         edit_age = st.number_input("年龄", min_value=0, max_value=150, value=row.get('age', 50))
                         
-                        edit_gender_options = ["男", "女", "其他"] + st.session_state.custom_genders
-                        edit_gender = st.selectbox("性别", edit_gender_options, index=edit_gender_options.index(row.get('gender', '未知')) if row.get('gender', '未知') in edit_gender_options else 0)
-                        
-                        if edit_gender == "其他":
-                            edit_custom_gender = st.text_input("请输入自定义性别", value=row.get('gender', ''))
+                        edit_gender_options = ["男", "女", "其他"]
+                        # 检查当前性别是否为自定义性别
+                        current_gender = row.get('gender', '未知')
+                        if current_gender not in ["男", "女", "其他"]:
+                            # 如果是自定义性别，默认选择"其他"
+                            edit_gender = st.selectbox("性别", edit_gender_options, index=2)  # 2 是"其他"的索引
+                            edit_custom_gender = st.text_input("自定义性别", value=current_gender, placeholder="请输入1-20个字符", max_chars=20)
                         else:
-                            edit_custom_gender = edit_gender
+                            edit_gender = st.selectbox("性别", edit_gender_options, index=edit_gender_options.index(current_gender) if current_gender in edit_gender_options else 0)
+                            if edit_gender == "其他":
+                                edit_custom_gender = st.text_input("自定义性别", placeholder="请输入1-20个字符", max_chars=20)
+                            else:
+                                edit_custom_gender = edit_gender
                         
                         edit_diagnosis = st.text_area("诊断信息", value=row.get('diagnosis', ''))
                         
@@ -211,28 +236,46 @@ if page == "🏥 病人信息":
                             if not edit_name or not edit_code:
                                 st.error("病人姓名和编号不能为空")
                             else:
-                                final_edit_gender = edit_custom_gender if edit_gender == "其他" and edit_custom_gender else edit_gender
+                                final_edit_gender = None
                                 
-                                if final_edit_gender not in ["男", "女", "其他"] and final_edit_gender not in st.session_state.custom_genders:
-                                    st.session_state.custom_genders.append(final_edit_gender)
+                                if edit_gender == "其他":
+                                    if not edit_custom_gender:
+                                        st.error("选择'其他'时请输入自定义性别")
+                                    elif len(edit_custom_gender.strip()) < 1:
+                                        st.error("自定义性别不能为空")
+                                    else:
+                                        # 验证是否包含HTML标签或脚本内容
+                                        import re
+                                        html_pattern = re.compile(r'<[^>]+>')
+                                        script_pattern = re.compile(r'<script[^>]*>.*?</script>', re.DOTALL)
+                                        
+                                        if html_pattern.search(edit_custom_gender) or script_pattern.search(edit_custom_gender):
+                                            st.error("自定义性别不允许包含HTML标签或脚本内容")
+                                        else:
+                                            final_edit_gender = edit_custom_gender
+                                            if final_edit_gender not in st.session_state.custom_genders:
+                                                st.session_state.custom_genders.append(final_edit_gender)
+                                else:
+                                    final_edit_gender = edit_gender
                                 
-                                update_data = {
-                                    "patient_name": edit_name,
-                                    "patient_code": edit_code,
-                                    "age": edit_age,
-                                    "gender": final_edit_gender,
-                                    "diagnosis": edit_diagnosis
-                                }
-                                
-                                try:
-                                    supabase.table("patients").update(update_data).eq("id", row['id']).execute()
-                                    st.success(f"✅ 病人信息更新成功！")
-                                    st.cache_data.clear()
-                                    del st.session_state.edit_patient_id
-                                    del st.session_state.edit_patient_data
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"更新失败: {e}")
+                                if final_edit_gender:
+                                    update_data = {
+                                        "patient_name": edit_name,
+                                        "patient_code": edit_code,
+                                        "age": edit_age,
+                                        "gender": final_edit_gender,
+                                        "diagnosis": edit_diagnosis
+                                    }
+                                    
+                                    try:
+                                        supabase.table("patients").update(update_data).eq("id", row['id']).execute()
+                                        st.success(f"✅ 病人信息更新成功！")
+                                        st.cache_data.clear()
+                                        del st.session_state.edit_patient_id
+                                        del st.session_state.edit_patient_data
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"更新失败: {e}")
 
 elif page == "📤 数据上传":
     st.header("📤 数据上传与文件管理")
@@ -250,11 +293,12 @@ elif page == "📤 数据上传":
             upload_patient_code = st.text_input("病人编号", placeholder="例如: P001")
             upload_age = st.number_input("年龄", min_value=0, max_value=150, value=50)
             
-            upload_gender_options = ["男", "女", "其他"] + st.session_state.custom_genders
+            upload_gender_options = ["男", "女", "其他"]
             upload_gender = st.selectbox("性别", upload_gender_options)
             
+            upload_custom_gender = None
             if upload_gender == "其他":
-                upload_custom_gender = st.text_input("请输入自定义性别")
+                upload_custom_gender = st.text_input("自定义性别", placeholder="请输入1-20个字符", max_chars=20)
             else:
                 upload_custom_gender = upload_gender
             
@@ -262,25 +306,43 @@ elif page == "📤 数据上传":
             submit_new = st.form_submit_button("上传并创建病人")
             
             if submit_new and upload_patient_name and upload_patient_code and upload_file:
-                final_upload_gender = upload_custom_gender if upload_gender == "其他" and upload_custom_gender else upload_gender
+                final_upload_gender = None
                 
-                if final_upload_gender not in ["男", "女", "其他"] and final_upload_gender not in st.session_state.custom_genders:
-                    st.session_state.custom_genders.append(final_upload_gender)
+                if upload_gender == "其他":
+                    if not upload_custom_gender:
+                        st.error("选择'其他'时请输入自定义性别")
+                    elif len(upload_custom_gender.strip()) < 1:
+                        st.error("自定义性别不能为空")
+                    else:
+                        # 验证是否包含HTML标签或脚本内容
+                        import re
+                        html_pattern = re.compile(r'<[^>]+>')
+                        script_pattern = re.compile(r'<script[^>]*>.*?</script>', re.DOTALL)
+                        
+                        if html_pattern.search(upload_custom_gender) or script_pattern.search(upload_custom_gender):
+                            st.error("自定义性别不允许包含HTML标签或脚本内容")
+                        else:
+                            final_upload_gender = upload_custom_gender
+                            if final_upload_gender not in st.session_state.custom_genders:
+                                st.session_state.custom_genders.append(final_upload_gender)
+                else:
+                    final_upload_gender = upload_gender
                 
-                patient_id = str(uuid.uuid4())
-                patient_data = {
-                    "id": patient_id,
-                    "patient_name": upload_patient_name,
-                    "patient_code": upload_patient_code,
-                    "age": upload_age,
-                    "gender": final_upload_gender,
-                    "created_at": datetime.now().isoformat()
-                }
-                try:
-                    supabase.table("patients").insert(patient_data).execute()
-                    upload_patient_id = patient_id
-                except Exception as e:
-                    st.error(f"创建病人失败: {e}")
+                if final_upload_gender:
+                    patient_id = str(uuid.uuid4())
+                    patient_data = {
+                        "id": patient_id,
+                        "patient_name": upload_patient_name,
+                        "patient_code": upload_patient_code,
+                        "age": upload_age,
+                        "gender": final_upload_gender,
+                        "created_at": datetime.now().isoformat()
+                    }
+                    try:
+                        supabase.table("patients").insert(patient_data).execute()
+                        upload_patient_id = patient_id
+                    except Exception as e:
+                        st.error(f"创建病人失败: {e}")
     else:
         if patients_df.empty:
             st.warning("暂无现有病人，请先创建病人")
