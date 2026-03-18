@@ -15,8 +15,8 @@ from utils import (
 )
 
 st.set_page_config(page_title="嘻嘻", layout="wide")
-st.title("🧠 生理信号 - DT物联网系统")
-st.markdown("**Enhanced Version**：Designed by Nnian,2026")
+st.title("🧠 Welcome to DT-Iot System 🧠")
+st.markdown("**Enhanced Version**：Designed by Nnian, 2026")
 
 st.markdown("""
 <style>
@@ -733,8 +733,6 @@ elif page == "🚨 异常报警":
                     return "color: white; background-color: #ff4d4d; font-weight: bold"
                 return ""
             
-            styled_df = df_display.style.apply(lambda x: [highlight_abnormal(v, col) for col, v in x.items()], axis=1)
-            
             if abnormal_count > 0:
                 st.error(f"🚨 发现 {abnormal_count} 条异常记录！")
                 page_size = 20
@@ -742,7 +740,11 @@ elif page == "🚨 异常报警":
                 page = st.number_input("页码", min_value=1, max_value=total_pages, value=1)
                 start_idx = (page - 1) * page_size
                 end_idx = start_idx + page_size
-                st.dataframe(styled_df.iloc[start_idx:end_idx], use_container_width=True, hide_index=True)
+                
+                # 先对DataFrame进行切片，然后再应用样式
+                paginated_df = df_display.iloc[start_idx:end_idx]
+                styled_df = paginated_df.style.apply(lambda x: [highlight_abnormal(v, col) for col, v in x.items()], axis=1)
+                st.dataframe(styled_df, use_container_width=True, hide_index=True)
                 
                 hr_abnormal = (df["heart_rate"] < current_thresholds["heart_rate_min"]) | (df["heart_rate"] > current_thresholds["heart_rate_max"])
                 bp_abnormal = (df["systolic_bp"] > current_thresholds["systolic_max"]) | (df["diastolic_bp"] > current_thresholds["diastolic_max"])
@@ -877,4 +879,4 @@ elif page == "⚙️ 阈值设置":
     else:
         st.info("当前使用全局默认阈值")
 
-st.caption(f"Version:1.2.0 Designed by Nnian,2026.3.17")
+st.caption(f"Version:1.2.0, 2026.3.18")
