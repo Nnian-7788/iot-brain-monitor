@@ -14,7 +14,7 @@ from utils import (
     init_session_state, get_current_thresholds, force_refresh, get_patient_id_map
 )
 
-st.set_page_config(page_title="嘻嘻", layout="wide")
+st.set_page_config(page_title="Lovewellsup", layout="wide")
 st.title("🧠 Welcome to DT-Iot System 🧠")
 st.markdown("**Enhanced Version**：Designed by Nnian, 2026")
 
@@ -790,7 +790,7 @@ elif page == "🧬 脑数字孪生模型":
         df = get_signals(current_patient_id, 1)
         
         if not df.empty and st.button("🚀 运行内置简易模型"):
-            with st.spinner("高性能数值计算中..."):
+            with st.spinner("数值计算中..."):
                 latest = df.iloc[0]
                 t, sol, risk = run_brain_model_cached(latest["systolic_bp"], latest["spo2"])
                 
