@@ -15,7 +15,7 @@ from utils import (
 )
 
 st.set_page_config(page_title="Lovewellsup", layout="wide")
-st.title("🧠 Welcome to DT-Iot System 🧠")
+st.title("🧠 欢迎来到 DT-Iot 系统 🧠")
 st.markdown("**Enhanced Version**：Designed by Nnian, 2026")
 
 st.markdown("""
